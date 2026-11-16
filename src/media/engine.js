@@ -3,7 +3,7 @@ const { spawn } = require('child_process');
 
 function runTool(file, args, options = {}) {
   return new Promise((resolve, reject) => {
-    const { timeoutMs = 10000, signal, maxBytes = 4 * 1024 * 1024 } = options;
+    const { timeoutMs = 10000, signal, maxBytes = 4 * 1024 * 1024, onStderr, discardStderr = false } = options;
     if (signal?.aborted) return reject(Object.assign(new Error('Cancelled'), { code: 'CANCELLED' }));
     let child, reason, size = 0;
     const chunks = [];
@@ -19,7 +19,7 @@ function runTool(file, args, options = {}) {
       chunks.push({ channel, data });
     };
     child.stdout.on('data', data => collect('stdout', data));
-    child.stderr.on('data', data => collect('stderr', data));
+    child.stderr.on('data', data => { if (onStderr) onStderr(data); if (!discardStderr) collect('stderr', data); });
     child.once('error', error => { clearTimeout(timer); signal?.removeEventListener('abort', abort); reject(error); });
     child.once('close', code => {
       clearTimeout(timer); signal?.removeEventListener('abort', abort);
