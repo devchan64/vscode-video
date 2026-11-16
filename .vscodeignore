@@ -1,0 +1,7 @@
+.vscode-test/**
+test/**
+docs/**
+node_modules/**
+AGENTS.md
+.gitignore
+scripts/**

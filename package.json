@@ -1,0 +1,74 @@
+{
+  "name": "vscode-video-editor",
+  "displayName": "Video Editor",
+  "description": "A video editor for Visual Studio Code.",
+  "version": "0.0.1",
+  "publisher": "video-editor-dev",
+  "private": true,
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./src/extension.js",
+  "activationEvents": [
+    "onCommand:videoEditor.open",
+    "onCommand:videoEditor.newProject",
+    "onCommand:videoEditor.openProject",
+    "onCommand:videoEditor.saveProject"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "videoEditor.open",
+        "title": "Video Editor: Open"
+      },
+      {
+        "command": "videoEditor.checkEngine",
+        "title": "Video Editor: Check Media Engine"
+      },
+      {
+        "command": "videoEditor.newProject",
+        "title": "Video Editor: New Project"
+      },
+      {
+        "command": "videoEditor.openProject",
+        "title": "Video Editor: Open Project"
+      },
+      {
+        "command": "videoEditor.saveProject",
+        "title": "Video Editor: Save Project"
+      }
+    ],
+    "configuration": {
+      "title": "Video Editor",
+      "properties": {
+        "videoEditor.ffmpegPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Absolute path to the FFmpeg executable; empty uses PATH."
+        },
+        "videoEditor.ffprobePath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Absolute path to the ffprobe executable; empty uses PATH."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "check": "node --check src/extension.js && node --check src/protocol.js && node --check src/webview.js && node --check test/e2e/run.js && node --check test/e2e/suite.js && node --check src/media/engine.js && node --check src/model/time.js && node --check src/model/project.js && node --check src/model/storage.js && node --check src/media/probe.js && node --check src/media/frames.js",
+    "test:unit": "node --test test/unit/*.test.js",
+    "test:e2e": "node test/e2e/run.js",
+    "package": "vsce package --no-dependencies --allow-missing-repository -o /tmp/vscode-video-stage0.vsix && python3 scripts/verify-vsix.py /tmp/vscode-video-stage0.vsix",
+    "test:integration": "node --test test/integration/*.test.js"
+  },
+  "devDependencies": {
+    "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "3.7.1",
+    "ws": "^8.23.0"
+  }
+}
