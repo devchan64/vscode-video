@@ -88,6 +88,18 @@ function apply(project, command) {
         c.sourceOut=at; clampFades(c); clampFades(right); item.track.clips.push(right);
       } break;
     }
+    case 'audio': {
+      const track=p.tracks.find(t=>t.id===command.trackId);
+      if (!track || track.kind!=='audio') fail('Audio track not found');
+      const c=command.clipId ? track.clips.find(item=>item.id===command.clipId) : undefined;
+      if (command.clipId && !c) fail('Audio clip not found');
+      const target=c || track;
+      if (command.gain !== undefined) { if (typeof command.gain!=='number' || !Number.isFinite(command.gain) || command.gain<0 || command.gain>4) fail('Invalid gain'); target.gain=command.gain; }
+      if (command.muted !== undefined) { if (typeof command.muted!=='boolean') fail('Invalid mute'); target.muted=command.muted; }
+      if (c && command.fadeIn !== undefined) c.fadeIn=T.parse(command.fadeIn);
+      if (c && command.fadeOut !== undefined) c.fadeOut=T.parse(command.fadeOut);
+      break;
+    }
     case 'detach': {
       const group=selected(p,command.clipId); if (group.length < 2) return project;
       for (const item of group) delete item.clip.linkId; break;

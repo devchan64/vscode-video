@@ -28,3 +28,20 @@ test('frame snap uses other clip boundaries and invalid edits stay atomic',()=>{
  assert.equal(view(h).tracks[0].clips[1].start,60);
  assert.equal(snapped.revision,p.revision);
 });
+test('audio settings, invalid fades, detach and undo preserve linked clips',()=>{
+ const h=fixture(); let p=edit(h,{action:'add',assetId:'asset',revision:0});
+ const audio=p.tracks.find(t=>t.kind==='audio'), clip=audio.clips[0];
+ p=edit(h,{action:'audio',trackId:audio.id,clipId:clip.id,gain:0.5,muted:true,fadeIn:3,fadeOut:6,revision:p.revision});
+ let v=view(h).tracks.find(t=>t.kind==='audio');
+ assert.deepEqual([v.clips[0].gain,v.clips[0].muted,v.clips[0].fadeIn,v.clips[0].fadeOut],[0.5,true,3,6]);
+ p=edit(h,{action:'audio',trackId:audio.id,gain:0.25,muted:true,revision:p.revision});
+ const stable=JSON.stringify(h.snapshot());
+ assert.throws(()=>edit(h,{action:'audio',trackId:audio.id,clipId:clip.id,fadeIn:61,revision:p.revision}),/Invalid clip audio/);
+ assert.throws(()=>edit(h,{action:'audio',trackId:audio.id,gain:5,revision:p.revision}),/Invalid gain/);
+ assert.equal(JSON.stringify(h.snapshot()),stable);
+ p=edit(h,{action:'detach',clipId:clip.id,revision:p.revision});
+ assert.ok(view(h).tracks.every(t=>!t.clips[0].linked));
+ p=edit(h,{action:'undo',revision:p.revision});
+ assert.ok(view(h).tracks.every(t=>t.clips[0].linked));
+ v=view(h).tracks.find(t=>t.kind==='audio'); assert.equal(v.gain,0.25); assert.equal(v.muted,true);
+});

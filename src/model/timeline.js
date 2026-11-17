@@ -52,6 +52,15 @@ function edit(history, message) {
  const p=history.snapshot();
  if (!message || message.revision!==p.revision) throw new Error('Project changed; try again');
  if (message.action==='add') return addAsset(history,message.assetId);
+ if (message.action==='audio') {
+  const cmd={type:'audio',trackId:message.trackId,clipId:message.clipId || undefined};
+  if (message.gain !== undefined) cmd.gain=message.gain;
+  if (message.muted !== undefined) cmd.muted=message.muted;
+  if (message.fadeIn !== undefined) cmd.fadeIn=frame(message.fadeIn,p.settings.fps);
+  if (message.fadeOut !== undefined) cmd.fadeOut=frame(message.fadeOut,p.settings.fps);
+  return history.dispatch(cmd);
+ }
+ if (message.action==='detach') return history.dispatch({type:'detach',clipId:message.clipId});
  if (message.action==='undo') return history.undo();
  if (message.action==='redo') return history.redo();
  if (typeof message.clipId!=='string') throw new Error('Select a clip');
@@ -68,6 +77,6 @@ function edit(history, message) {
 function view(history) {
  if (!history) return null;
  const project=history.snapshot(), fps=project.settings.fps;
- return {revision:project.revision,fps,canUndo:history.undoStack.length>0,canRedo:history.redoStack.length>0,tracks:project.tracks.map(t=>({id:t.id,kind:t.kind,clips:t.clips.map(c=>({id:c.id,assetId:c.assetId,linked:Boolean(c.linkId),start:frameNumber(c.start,fps),end:frameNumber(end(c),fps)}))}))};
+ return {revision:project.revision,fps,canUndo:history.undoStack.length>0,canRedo:history.redoStack.length>0,tracks:project.tracks.map(t=>({id:t.id,kind:t.kind,gain:t.gain,muted:t.muted,clips:t.clips.map(c=>({id:c.id,assetId:c.assetId,linked:Boolean(c.linkId),gain:c.gain,muted:c.muted,fadeIn:frameNumber(c.fadeIn,fps),fadeOut:frameNumber(c.fadeOut,fps),start:frameNumber(c.start,fps),end:frameNumber(end(c),fps)}))}))};
 }
 module.exports={addAsset,edit,view,frameNumber,snapFrame};

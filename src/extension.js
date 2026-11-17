@@ -9,6 +9,7 @@ const { saveProject, loadProject, inspectAssets, relinkAsset } = require('./mode
 const { probeMedia, decimalTime } = require('./media/probe');
 const { indexFrames, decodeFrame } = require('./media/frames');
 const { PreviewCache } = require('./media/preview-cache');
+const { renderTimeline, preparePlayback } = require('./media/timeline-preview');
 const fs = require('fs/promises');
 const { watch } = require('fs');
 const { pathToFileURL, fileURLToPath } = require('url');
@@ -27,6 +28,34 @@ function activate(context) {
   let frameRequest = 0;
   let activeFrame;
   let currentFrame;
+  let timelinePreviewController, timelinePreviewSequence=0;
+  function clearTimelinePreview() {
+    timelinePreviewSequence++; timelinePreviewController?.abort(); timelinePreviewController=undefined;
+    if (panel) void panel.webview.postMessage({type:'timelinePreviewReset'});
+  }
+  async function createTimelinePreview() {
+    if (!panel) return;
+    if (!projectHistory) { void panel.webview.postMessage({type:'timelinePreviewError',message:'Create or open a project first.'}); return; }
+    clearTimelinePreview();
+    const seq=timelinePreviewSequence, history=projectHistory, snapshot=history.snapshot();
+    const controller=new AbortController(); timelinePreviewController=controller;
+    const output=path.join(context.globalStorageUri.fsPath,`timeline-preview-${crypto.randomUUID()}.webm`);
+    void panel.webview.postMessage({type:'timelinePreviewLoading'});
+    try {
+      await fs.mkdir(context.globalStorageUri.fsPath,{recursive:true});
+      const result=await renderTimeline(snapshot,output,sourcePath,{ffmpeg:configuredTool('ffmpeg'),signal:controller.signal,onProgress:value=>{if(seq===timelinePreviewSequence && panel) void panel.webview.postMessage({type:'timelinePreviewProgress',value:Math.floor(value*0.85)});}});
+      if (seq!==timelinePreviewSequence || projectHistory!==history || history.snapshot().revision!==snapshot.revision || !panel) { await fs.rm(output,{force:true}); return; }
+      if(seq===timelinePreviewSequence && panel) void panel.webview.postMessage({type:'timelinePreviewProgress',value:90,phase:'prepare'});
+      const playback=await preparePlayback(output,context.globalStorageUri.fsPath,{ffmpeg:configuredTool('ffmpeg'),signal:controller.signal});
+      if (seq!==timelinePreviewSequence || projectHistory!==history || history.snapshot().revision!==snapshot.revision || !panel) { await fs.rm(output,{force:true}); return; }
+      await fs.rm(output,{force:true}); timelinePreviewController=undefined;
+      void panel.webview.postMessage({type:'timelinePreviewReady',...playback,duration:result.duration,fps:snapshot.settings.fps,clipped:result.clipped});
+    } catch (error) {
+      await fs.rm(output,{force:true}).catch(()=>{});
+      if (seq===timelinePreviewSequence && error.code!=='CANCELLED' && panel) { timelinePreviewController=undefined; void panel.webview.postMessage({type:'timelinePreviewError',message:`Cannot render preview: ${error.message}`}); }
+    }
+  }
+
   const previewCache = new PreviewCache(path.join(context.globalStorageUri.fsPath, 'media-cache'));
   const previewStates = new Map(), previewJobs = new Map(), mediaWatchers = new Map();
   function clearPreviews(assetId) {
@@ -50,7 +79,7 @@ function activate(context) {
               try {
                 const statuses=await inspectAssets(currentPath,history.snapshot());
                 if (projectHistory !== history || mediaWatchers.get(asset.id) !== watcher) return;
-                clearPreviews(asset.id); assetStatuses=statuses; schedulePreviews(); projectNotice();
+                clearTimelinePreview(); clearPreviews(asset.id); assetStatuses=statuses; schedulePreviews(); projectNotice();
               } catch { if (mediaWatchers.get(asset.id) === watcher) { clearPreviews(asset.id); projectNotice(); } }
             },150);
           });
@@ -104,7 +133,7 @@ function activate(context) {
   }
   context.subscriptions.push(vscode.commands.registerCommand('videoEditor.newProject', async () => {
     if (!await canReplace()) return;
-    resetFrame(); clearPreviews();
+    clearTimelinePreview(); resetFrame(); clearPreviews();
     projectHistory = new History(createProject({width:1920,height:1080,fps:rational(30),sampleRate:48000,channels:2}));
     projectPath = undefined; projectDirty = true; assetStatuses = [];
     await openEditor(); projectNotice();
@@ -116,7 +145,7 @@ function activate(context) {
     try {
       if (selected[0].scheme !== 'file') throw new Error('Only local projects are supported');
       const result = await loadProject(selected[0].fsPath);
-      resetFrame(); clearPreviews();
+      clearTimelinePreview(); resetFrame(); clearPreviews();
       projectHistory = new History(result.project); projectPath = selected[0].fsPath; projectDirty = false; assetStatuses = result.assets;
       await openEditor(); schedulePreviews(); projectNotice();
       const missing=result.assets.filter(asset => asset.status !== 'available');
@@ -147,7 +176,7 @@ function activate(context) {
       if (projectHistory !== history || projectPath !== sourceProjectPath || history.snapshot().revision !== revision) throw new Error('Project changed during media inspection');
       if (selection?.assetId === assetId) resetFrame();
       clearPreviews(assetId);
-      history.replace(updated); projectDirty = true;
+      clearTimelinePreview(); history.replace(updated); projectDirty = true;
       await updateAssets(); schedulePreviews(); projectNotice();
     } catch (error) { void vscode.window.showErrorMessage(`Cannot relink media: ${error.message}`); }
   }
@@ -176,7 +205,7 @@ function activate(context) {
         const after = await fs.stat(uri.fsPath);
         if (before.size !== after.size || before.mtimeMs !== after.mtimeMs) throw new Error('Media changed during inspection');
         if (history !== projectHistory) throw new Error('Project changed');
-        history.dispatch({ type:'addAsset', asset:{ id:crypto.randomUUID(), uri:pathToFileURL(uri.fsPath).href, duration:info.duration, streams:info.streams, fingerprint:{size:String(after.size),modified:after.mtimeMs} } });
+        clearTimelinePreview(); history.dispatch({ type:'addAsset', asset:{ id:crypto.randomUUID(), uri:pathToFileURL(uri.fsPath).href, duration:info.duration, streams:info.streams, startTime:info.startTime, fingerprint:{size:String(after.size),modified:after.mtimeMs} } });
         projectDirty = true;
       } catch { failed++; }
     }
@@ -270,9 +299,11 @@ function activate(context) {
     const current = panel;
     const nonce = crypto.randomBytes(16).toString('base64');
     const script = current.webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'src', 'webview.js'));
-    current.webview.html = `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; img-src data:;"><style nonce="${nonce}">body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);padding:1rem}button{font:inherit;color:var(--vscode-button-foreground);background:var(--vscode-button-background);border:1px solid transparent;padding:.5rem .8rem;cursor:pointer}button:hover{background:var(--vscode-button-hoverBackground)}button:focus-visible{outline:2px solid var(--vscode-focusBorder)}button[aria-pressed=true]{border-color:var(--vscode-focusBorder)}main{margin-top:1rem;border:1px solid var(--vscode-panel-border);padding:2rem;min-height:12rem}#error{color:var(--vscode-errorForeground)}#frame-image{max-width:100%;max-height:50vh}#timeline-scroll{overflow:auto;max-width:100%;border:1px solid var(--vscode-panel-border)}.track{position:relative;height:3rem;border-bottom:1px solid var(--vscode-panel-border);min-width:100%}.track-label{position:sticky;left:0;z-index:2;background:var(--vscode-editor-background)}.timeline-ruler{height:1.5rem}.ruler-mark{position:absolute;font-size:.75em}.playhead{position:absolute;color:var(--vscode-charts-red);top:0}.timeline-clip{position:absolute;top:1.1rem;height:1.8rem;overflow:hidden;white-space:nowrap;padding:0 .3rem}.timeline-clip[aria-pressed=true]{outline:2px solid var(--vscode-focusBorder)}.media-preview{display:block;max-width:100%;height:auto;margin:.25rem 0}</style></head><body><header><h1>Video Editor</h1><p id="project-name">No project open</p><div role="group" aria-label="Editor mode"><button id="preview" aria-pressed="true">Preview</button> <button id="edit" aria-pressed="false">Edit</button></div> <button id="save-project">Save project</button></header><main><h2 id="mode-heading">Preview</h2><p id="empty">No media is open.</p><img id="frame-image" alt="Selected video frame" hidden><p id="frame-info" role="status"></p><progress id="frame-progress" max="100" aria-label="Frame processing progress" hidden></progress> <button id="cancel-frame" hidden>Cancel frame processing</button><div><button id="prev-frame" disabled>Previous frame</button> <button id="next-frame" disabled>Next frame</button> <label>Frame <input id="frame-number" type="number" min="1" disabled></label> <button id="go-frame" disabled>Go</button> <label>Time (seconds) <input id="frame-time" type="number" min="0" step="any" disabled></label> <button id="go-time" disabled>Seek</button> <button id="extract-frame" disabled>Extract frame</button></div></main><section id="timeline-panel" aria-label="Timeline" hidden><h2>Timeline</h2><p>Positions are project frame numbers (starting at 0).</p><div id="timeline-toolbar"><button id="timeline-undo">Undo</button> <button id="timeline-redo">Redo</button> <label>Position <input id="timeline-frame" type="number" min="0" max="100000000" value="0"></label> <label><input id="timeline-snap" type="checkbox" checked>Snap</label> <button id="clip-move">Move</button> <button id="clip-trim-start">Trim start</button> <button id="clip-trim-end">Trim end</button> <button id="clip-split">Split</button> <button id="clip-delete">Delete</button> <button id="clip-ripple">Ripple delete</button> <button id="zoom-out">−</button> <button id="zoom-in">+</button></div><p id="timeline-status" role="status"></p><div id="timeline-scroll" tabindex="0" aria-label="Timeline tracks"><div id="timeline-tracks"></div></div></section><section aria-label="Project media"><h2>Project media</h2><button id="import-media">Import media</button><ul id="media-list"></ul></section><section aria-label="Media engine"><h2>Media engine</h2><p id="engine-status" role="status">Not checked</p><button id="check-engine">Check engine</button></section><p id="error" role="alert" hidden></p><script nonce="${nonce}" data-e2e="${process.env.VIDEO_EDITOR_E2E === '1' ? '1' : '0'}" src="${script}"></script></body></html>`;
+    current.webview.html = `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; img-src data:; "><style nonce="${nonce}">body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);padding:1rem}button{font:inherit;color:var(--vscode-button-foreground);background:var(--vscode-button-background);border:1px solid transparent;padding:.5rem .8rem;cursor:pointer}button:hover{background:var(--vscode-button-hoverBackground)}button:focus-visible{outline:2px solid var(--vscode-focusBorder)}button[aria-pressed=true]{border-color:var(--vscode-focusBorder)}main{margin-top:1rem;border:1px solid var(--vscode-panel-border);padding:2rem;min-height:12rem}#error{color:var(--vscode-errorForeground)}#frame-image,#timeline-image{max-width:100%;max-height:50vh}#timeline-scroll{overflow:auto;max-width:100%;border:1px solid var(--vscode-panel-border)}.track{position:relative;height:3rem;border-bottom:1px solid var(--vscode-panel-border);min-width:100%}.track-label{position:sticky;left:0;z-index:2;background:var(--vscode-editor-background)}.timeline-ruler{height:1.5rem}.ruler-mark{position:absolute;font-size:.75em}.playhead{position:absolute;color:var(--vscode-charts-red);top:0}.timeline-clip{position:absolute;top:1.1rem;height:1.8rem;overflow:hidden;white-space:nowrap;padding:0 .3rem}.timeline-clip[aria-pressed=true]{outline:2px solid var(--vscode-focusBorder)}.media-preview{display:block;max-width:100%;height:auto;margin:.25rem 0}</style></head><body><header><h1>Video Editor</h1><p id="project-name">No project open</p><div role="group" aria-label="Editor mode"><button id="preview" aria-pressed="true">Preview</button> <button id="edit" aria-pressed="false">Edit</button></div> <button id="save-project">Save project</button></header><main><h2 id="mode-heading">Preview</h2><div role="group" aria-label="Preview target"><button id="target-source" aria-pressed="true">Source</button> <button id="target-timeline" aria-pressed="false">Timeline</button></div><section id="source-view"><p id="empty">No media is open.</p><img id="frame-image" alt="Selected video frame" hidden><p id="frame-info" role="status"></p><progress id="frame-progress" max="100" aria-label="Frame processing progress" hidden></progress> <button id="cancel-frame" hidden>Cancel frame processing</button><div><button id="prev-frame" disabled>Previous frame</button> <button id="next-frame" disabled>Next frame</button> <label>Frame <input id="frame-number" type="number" min="1" disabled></label> <button id="go-frame" disabled>Go</button> <label>Time (seconds) <input id="frame-time" type="number" min="0" step="any" disabled></label> <button id="go-time" disabled>Seek</button> <button id="extract-frame" disabled>Extract frame</button></div></section><section id="timeline-view" hidden><p id="timeline-preview-status" role="status">Render a timeline preview to play it.</p><progress id="timeline-preview-progress" max="100" hidden></progress> <button id="render-timeline">Render timeline preview</button> <button id="cancel-timeline" hidden>Cancel preview</button><img id="timeline-image" alt="Timeline preview frame" hidden><div><button id="timeline-play" disabled>Play</button> <button id="timeline-pause" disabled>Pause</button> <span id="timeline-time">0.00 s</span></div></section></main><section id="timeline-panel" aria-label="Timeline" hidden><h2>Timeline</h2><p>Positions are project frame numbers (starting at 0).</p><div id="timeline-toolbar"><button id="timeline-undo">Undo</button> <button id="timeline-redo">Redo</button> <label>Position <input id="timeline-frame" type="number" min="0" max="100000000" value="0"></label> <label><input id="timeline-snap" type="checkbox" checked>Snap</label> <button id="clip-move">Move</button> <button id="clip-trim-start">Trim start</button> <button id="clip-trim-end">Trim end</button> <button id="clip-split">Split</button> <button id="clip-delete">Delete</button> <button id="clip-ripple">Ripple delete</button> <button id="clip-detach">Detach audio</button> <button id="zoom-out">−</button> <button id="zoom-in">+</button></div><div id="audio-editor" hidden><label>Clip gain <input id="audio-clip-gain" type="number" min="0" max="4" step="0.1"></label> <label><input id="audio-clip-muted" type="checkbox">Mute clip</label> <label>Fade in (frames) <input id="audio-fade-in" type="number" min="0"></label> <label>Fade out (frames) <input id="audio-fade-out" type="number" min="0"></label> <button id="audio-clip-apply">Apply clip audio</button> <label>Track gain <input id="audio-track-gain" type="number" min="0" max="4" step="0.1"></label> <label><input id="audio-track-muted" type="checkbox">Mute track</label> <button id="audio-track-apply">Apply track audio</button></div><p id="timeline-status" role="status"></p><div id="timeline-scroll" tabindex="0" aria-label="Timeline tracks"><div id="timeline-tracks"></div></div></section><section aria-label="Project media"><h2>Project media</h2><button id="import-media">Import media</button><ul id="media-list"></ul></section><section aria-label="Media engine"><h2>Media engine</h2><p id="engine-status" role="status">Not checked</p><button id="check-engine">Check engine</button></section><p id="error" role="alert" hidden></p><script nonce="${nonce}" data-e2e="${process.env.VIDEO_EDITOR_E2E === '1' ? '1' : '0'}" src="${script}"></script></body></html>`;
     current.webview.onDidReceiveMessage(message => {
       if (message && message.type === 'ready' && projectHistory) { schedulePreviews(); projectNotice(); }
+      if (message && message.type === 'renderTimeline') { void createTimelinePreview(); return; }
+      if (message && message.type === 'cancelTimeline') { clearTimelinePreview(); return; }
       if (message && message.type === 'saveProject') { void vscode.commands.executeCommand('videoEditor.saveProject'); return; }
       if (message && message.type === 'timelineAction') {
         try {
@@ -281,7 +312,7 @@ function activate(context) {
           if (message.command.action === 'add' && assetStatuses.find(asset => asset.id === message.command.assetId)?.status !== 'available') throw new Error('Media is unavailable');
           const history=projectHistory, before=history.snapshot();
           const result=timeline.edit(history,message.command);
-          if (result.revision !== before.revision) projectDirty=true;
+          if (result.revision !== before.revision) { projectDirty=true; clearTimelinePreview(); }
           const ids=new Set(result.assets.map(asset=>asset.id));
           for (const asset of before.assets) if (!ids.has(asset.id)) { clearPreviews(asset.id); if (selection?.assetId===asset.id) resetFrame(); }
           if (before.assets.length !== result.assets.length || before.assets.some(asset=>!ids.has(asset.id))) {
@@ -321,10 +352,11 @@ function activate(context) {
       mode = result.mode;
       void current.webview.postMessage({ type: 'state', mode, error: result.error });
     }, null, context.subscriptions);
-    current.onDidDispose(() => { if (panel === current) { panel = undefined; engineRun++; activeCheck?.abort(); resetFrame(); clearPreviews(); } testState = undefined; }, null, context.subscriptions);
+    current.onDidDispose(() => { if (panel === current) { clearTimelinePreview(); panel = undefined; engineRun++; activeCheck?.abort(); resetFrame(); clearPreviews(); } testState = undefined; }, null, context.subscriptions);
   }));
   if (process.env.VIDEO_EDITOR_E2E === '1') {
     context.subscriptions.push(vscode.commands.registerCommand('videoEditor.test.dialogs', (...items) => { testDialogs.push(...items); }));
+    context.subscriptions.push(vscode.commands.registerCommand('videoEditor.test.audio', (gain,muted,fadeIn,fadeOut) => panel && panel.webview.postMessage({type:'testAudio',gain,muted,fadeIn,fadeOut})));
     context.subscriptions.push(vscode.commands.registerCommand('videoEditor.test.timeline', (control,frame) => panel && panel.webview.postMessage({type:'testTimeline',control,frame})));
     context.subscriptions.push(vscode.commands.registerCommand('videoEditor.test.seek', seconds => panel && panel.webview.postMessage({type:'testSeek',seconds})));
     context.subscriptions.push(vscode.commands.registerCommand('videoEditor.test.ui', action => panel && panel.webview.postMessage({ type:'testUI', action })));

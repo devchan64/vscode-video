@@ -4,7 +4,7 @@
 
 - 이 저장소는 프레임 단위 탐색·추출, 미리보기·편집 모드, 비파괴 타임라인 편집, 오디오 믹싱 및 내보내기를 제공하는 VS Code 비디오 편집기를 개발한다. 기능 기준은 [요구사항](video-editor-requirements.md), 코덱 후보와 배포 조건은 [코덱 비교](codec-license-comparison.md), 구현 계약은 [상세 설계](detailed-design.md), 작업 순서는 [구현 계획](implementation-plan.md), 화면 구성은 [UI 가이드](ui-guide.md), 컴포넌트 책임은 [컴포넌트 가이드](component-guide.md), 사용자 흐름은 [시나리오 검토](feature-scenarios.md), 검증 추적은 [테스트 체크리스트](test-checklist.md), 현재 환경과 첫 작업은 [구현 준비 현황](implementation-readiness.md), 외부 엔진 연동은 [배포와 연동 설계](media-engine-distribution.md)다.
 - 사용자 지시가 이 문서보다 우선한다. 기능, 설계 또는 검증 범위가 바뀌면 관련 문서를 같은 변경에서 갱신한다. 문서는 `docs/`에 작성한다.
-- 현재 단계 0의 확장 골격은 `src/extension.js`, 메시지 검증은 `src/protocol.js`, Webview는 `src/webview.js`, 외부 엔진 검사는 `src/media/engine.js`, 프레임 인덱싱·추출은 `src/media/frames.js`, 썸네일·파형 캐시는 `src/media/preview-cache.js`, 프로젝트 시간·편집·파일 처리는 `src/model/`, 타임라인 동작은 `src/model/timeline.js`에 있다. `npm run check`, `npm run test:unit`, `npm run test:integration`, `npm run test:e2e`, `npm run package`로 검증한다. 아직 구현하지 않은 기능을 완료된 것처럼 기록하지 않는다.
+- 확장 골격은 `src/extension.js`, 메시지 검증은 `src/protocol.js`, Webview는 `src/webview.js`, 외부 엔진 검사는 `src/media/engine.js`, 프레임 인덱싱·추출은 `src/media/frames.js`, 썸네일·파형 캐시는 `src/media/preview-cache.js`, 타임라인 미리보기 렌더링은 `src/media/timeline-preview.js`, 프로젝트 시간·편집·파일 처리는 `src/model/`, 타임라인 동작은 `src/model/timeline.js`에 있다. `npm run check`, `npm run test:unit`, `npm run test:integration`, `npm run test:e2e`, `npm run package`로 검증한다. 아직 구현하지 않은 기능을 완료된 것처럼 기록하지 않는다.
 - UI 문구와 명령 이름은 영어, README와 `docs/`는 한국어를 기본으로 한다. VS Code 테마와 키보드 접근성을 고려한다.
 
 ## 구현 원칙

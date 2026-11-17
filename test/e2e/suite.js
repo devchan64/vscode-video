@@ -8,6 +8,23 @@ const os = require('node:os');
 const { runTool } = require('../../src/media/engine');
 const { createProject } = require('../../src/model/project');
 const { rational } = require('../../src/model/time');
+async function nativeEnter(selector) {
+ const targets=await (await fetch('http://127.0.0.1:19227/json/list')).json();
+ const target=targets.find(item=>item.type==='iframe' && item.url.includes('extensionId=video-editor-dev.vscode-video-editor'));
+ assert.ok(target);
+ const socket=new WebSocket(target.webSocketDebuggerUrl);
+ await new Promise((resolve,reject)=>{socket.once('open',resolve);socket.once('error',reject);});
+ let id=0; const pending=new Map(),contexts=[];
+ socket.on('message',data=>{const m=JSON.parse(data);if(m.method==='Runtime.executionContextCreated')contexts.push(m.params.context.id);if(pending.has(m.id)){const p=pending.get(m.id);pending.delete(m.id);m.error?p.reject(new Error(m.error.message)):p.resolve(m.result);}});
+ const call=(method,params={})=>new Promise((resolve,reject)=>{const current=++id;pending.set(current,{resolve,reject});socket.send(JSON.stringify({id:current,method,params}));});
+ try {
+  await call('Runtime.enable'); let context;
+  for(const candidate of contexts){const r=await call('Runtime.evaluate',{contextId:candidate,expression:`Boolean(document.querySelector(${JSON.stringify(selector)}))`,returnByValue:true});if(r.result.value){context=candidate;break;}}
+  assert.ok(context,'play button context exists');
+  await call('Runtime.evaluate',{contextId:context,expression:`document.querySelector(${JSON.stringify(selector)}).focus()`});
+  for(const type of ['keyDown','keyUp']) await call('Input.dispatchKeyEvent',{type,key:'Enter',code:'Enter',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13,...(type==='keyDown'?{text:'\r',unmodifiedText:'\r'}:{})});
+ } finally {socket.close();}
+}
 async function waitFor(predicate) {
   const end = Date.now() + 10000;
   let state;
@@ -181,6 +198,22 @@ exports.run = async () => {
     await waitFor(state=>state.timeline?.tracks[0].clips.length===2);
     await vscode.commands.executeCommand('videoEditor.test.timeline','timeline-undo');
     await waitFor(state=>state.timeline?.tracks[0].clips.length===3);
+    await vscode.commands.executeCommand('videoEditor.test.timeline','clip-first-audio');
+    await vscode.commands.executeCommand('videoEditor.test.audio',0.5,false,3,3);
+    await waitFor(state=>state.timeline?.tracks.find(track=>track.kind==='audio')?.clips.some(clip=>clip.gain===0.5 && clip.fadeIn===3 && clip.fadeOut===3));
+    await vscode.commands.executeCommand('videoEditor.test.timeline','clip-detach');
+    await waitFor(state=>state.timeline?.tracks.every(track=>track.clips.some(clip=>clip.start===0 && !clip.linked)));
+    await vscode.commands.executeCommand('videoEditor.test.timeline','timeline-undo');
+    await waitFor(state=>state.timeline?.tracks.every(track=>track.clips.some(clip=>clip.start===0 && clip.linked)));
+    await vscode.commands.executeCommand('videoEditor.test.timeline','target-timeline');
+    await vscode.commands.executeCommand('videoEditor.test.timeline','render-timeline');
+    await waitFor(state=>state.timelinePreview==='Preview ready' && state.timelineVideoReady>=1);
+    await nativeEnter('#timeline-play');
+    const playing=await waitFor(state=>state.timelineVideoPaused===false && state.timelineVideoTime>0.2);
+    assert.ok(Math.abs(playing.playhead-Math.floor(playing.timelineVideoTime*30))<=2, 'video playhead follows audio clock');
+    await vscode.commands.executeCommand('videoEditor.test.timeline','target-source');
+    await waitFor(state=>state.timelineVideoPaused===true);
+    await vscode.commands.executeCommand('videoEditor.test.timeline','target-timeline');
     const importProject = path.join(dir, 'import.json');
     await vscode.commands.executeCommand('videoEditor.test.dialogs', importProject);
     await vscode.commands.executeCommand('videoEditor.saveProject');
@@ -193,5 +226,5 @@ exports.run = async () => {
     await fs.appendFile(replacement, 'changed');
     await waitFor(state => state.media.includes('changed') && state.previews <= 2);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
-  console.log('Extension Host: keyboard, engine, project, media import, frame preview and PNG extraction passed');
+  console.log('Extension Host: keyboard, media, timeline editing, audio preview and synchronized playback passed');
 };
